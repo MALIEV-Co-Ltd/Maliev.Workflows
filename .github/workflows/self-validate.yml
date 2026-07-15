@@ -1,0 +1,105 @@
+name: Repository self-validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - main
+
+permissions: {}
+
+concurrency:
+  group: self-validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-contracts:
+    name: Repository contracts and supply chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source without credentials
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.12.10
+          cache: pip
+          cache-dependency-path: tests/requirements-validation.txt
+
+      - name: Install hash-locked validation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: \
+            --requirement tests/requirements-validation.txt
+
+      - name: Install checksum-verified actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly version="1.7.12"
+          readonly archive="actionlint_${version}_linux_amd64.tar.gz"
+          readonly checksum="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          install -m 0755 "$RUNNER_TEMP/actionlint" "$RUNNER_TEMP/actionlint-bin"
+          printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Validate YAML, workflow contracts, actionlint, and diff
+        shell: pwsh
+        run: ./tests/validate.ps1 -ActionlintPath "$env:RUNNER_TEMP/actionlint-bin"
+
+      - name: Install checksum-verified Gitleaks
+        id: gitleaks-install
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly version="8.30.1"
+          readonly archive="gitleaks_${version}_linux_x64.tar.gz"
+          readonly checksum="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          install -m 0755 "$RUNNER_TEMP/gitleaks" "$RUNNER_TEMP/gitleaks-bin"
+
+      - name: Scan repository history for secrets
+        if: ${{ !cancelled() && steps.gitleaks-install.outcome == 'success' }}
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/gitleaks-bin" detect --source "$GITHUB_WORKSPACE" --no-banner --redact --exit-code 1
+
+  dotnet-gate-smoke:
+    name: Live reusable .NET gate smoke
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dotnet-pr-gate.yml
+    with:
+      target-path: tests/fixtures/dotnet-smoke/Maliev.Workflows.Smoke.slnx
+      working-directory: .
+      dotnet-version: 10.0.x
+      configuration: Release
+      coverage-threshold: 80
+      artifact-retention-days: 3
+
+  codeql-smoke:
+    name: Live reusable CodeQL smoke
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/codeql-dotnet.yml
+    with:
+      target-path: tests/fixtures/dotnet-smoke/Maliev.Workflows.Smoke.slnx
+      working-directory: .
+      dotnet-version: 10.0.x

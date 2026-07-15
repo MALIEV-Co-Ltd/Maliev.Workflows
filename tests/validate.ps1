@@ -1,6 +1,10 @@
 #!/usr/bin/env pwsh
 [CmdletBinding()]
-param()
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $ActionlintPath
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -16,15 +20,13 @@ try {
         throw 'Workflow contract tests failed.'
     }
 
-    $actionlint = Get-Command actionlint -ErrorAction SilentlyContinue
-    if ($null -ne $actionlint) {
-        & $actionlint.Source -color
-        if ($LASTEXITCODE -ne 0) {
-            throw 'actionlint failed.'
-        }
+    if (-not (Test-Path -LiteralPath $ActionlintPath -PathType Leaf)) {
+        throw "The reviewed actionlint binary does not exist: $ActionlintPath"
     }
-    else {
-        Write-Warning 'actionlint is not installed; contract tests and YAML parsing completed.'
+
+    & $ActionlintPath -color
+    if ($LASTEXITCODE -ne 0) {
+        throw 'actionlint failed.'
     }
 
     git diff --check
