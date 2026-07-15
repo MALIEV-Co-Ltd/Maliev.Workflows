@@ -48,6 +48,10 @@ ACTION_ALLOWLIST = {
         "v4.37.0",
     ),
 }
+EXPECTED_PERMISSIONS = {
+    "dotnet-pr-gate.yml": {"contents": "read"},
+    "codeql-dotnet.yml": {"contents": "read", "security-events": "write"},
+}
 
 
 def yaml_paths(root: Path) -> list[Path]:
@@ -122,17 +126,23 @@ class WorkflowContracts(unittest.TestCase):
                 self.assertNotIn("pull_request_target", repr(workflow).lower())
                 self.assertNotIn("secrets: inherit", raw)
                 self.assertNotRegex(raw, r"\$\{\{\s*secrets(?:\.|\[)")
-                permissions = workflow.get("permissions", {})
-                self.assertEqual("read", permissions.get("contents"))
-                self.assertTrue(
-                    set(permissions).issubset({"contents", "security-events"}),
-                    permissions,
-                )
+                self.assertEqual(EXPECTED_PERMISSIONS[name], workflow.get("permissions"))
                 for job_name, job in workflow.get("jobs", {}).items():
                     self.assertNotIn("permissions", job, job_name)
                     timeout = int(job.get("timeout-minutes", "0"))
                     self.assertGreater(timeout, 0, job_name)
                     self.assertLessEqual(timeout, 60, job_name)
+
+    def test_every_workflow_cancels_superseded_runs_with_a_bounded_group(self) -> None:
+        for name, workflow in self.workflows.items():
+            with self.subTest(workflow=name):
+                concurrency = workflow.get("concurrency", {})
+                self.assertEqual("true", concurrency.get("cancel-in-progress"))
+                group = concurrency.get("group", "")
+                self.assertGreater(len(group), 0)
+                self.assertLessEqual(len(group), 128)
+                self.assertIn("${{ github.workflow }}", group)
+                self.assertIn("${{ github.ref }}", group)
 
     def test_workflow_inputs_are_exact_typed_and_do_not_expand_the_trust_boundary(self) -> None:
         expected = {
@@ -272,6 +282,49 @@ class WorkflowContracts(unittest.TestCase):
         for retention in ("0", "1.5", "31", "999", "-1"):
             with self.subTest(invalid_retention=retention):
                 self.assertNotEqual(0, validate(ARTIFACT_RETENTION_DAYS=retention).returncode)
+
+    def test_codeql_input_helper_executes_real_path_and_sdk_boundaries(self) -> None:
+        codeql_steps = step_map(self.codeql)
+        script = embedded_python(
+            codeql_steps["Validate bounded inputs"]["run"],
+            "CODEQL_INPUT_VALIDATION_PYTHON",
+        )
+        baseline = {
+            **os.environ,
+            "TARGET_PATH": "src/App.slnx",
+            "WORKING_DIRECTORY": ".",
+            "DOTNET_VERSION": "10.0.x",
+        }
+
+        def validate(**overrides: str) -> subprocess.CompletedProcess[str]:
+            return run_python(script, [], {**baseline, **overrides})
+
+        for path in ("../escape.slnx", "src/../../escape.slnx", "/tmp/App.slnx", r"src\App.slnx"):
+            with self.subTest(target_path=path):
+                self.assertNotEqual(0, validate(TARGET_PATH=path).returncode)
+        for directory in ("../escape", "src/../../escape", "/tmp", r"src\nested"):
+            with self.subTest(working_directory=directory):
+                self.assertNotEqual(0, validate(WORKING_DIRECTORY=directory).returncode)
+        for sdk in ("8.0.x", "10.0.100", "10.0.100-preview.1"):
+            with self.subTest(valid_sdk=sdk):
+                self.assertEqual(0, validate(DOTNET_VERSION=sdk).returncode)
+        for sdk in ("", "10", "10.x", "latest", "10.0.x;echo", "../10.0.x", "10.0.*"):
+            with self.subTest(invalid_sdk=sdk):
+                self.assertNotEqual(0, validate(DOTNET_VERSION=sdk).returncode)
+
+    def test_gitleaks_binary_provenance_is_exact_and_immutable(self) -> None:
+        install = self.gate_steps["Install checksum-verified Gitleaks"]["run"]
+        self.assertIn('readonly version="8.30.1"', install)
+        self.assertIn('readonly archive="gitleaks_${version}_linux_x64.tar.gz"', install)
+        self.assertIn(
+            'readonly checksum="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"',
+            install,
+        )
+        self.assertIn(
+            'https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}',
+            install,
+        )
+        self.assertIn("sha256sum --check --strict", install)
 
     def test_coverage_helper_deduplicates_overlapping_source_lines(self) -> None:
         script = embedded_python(
