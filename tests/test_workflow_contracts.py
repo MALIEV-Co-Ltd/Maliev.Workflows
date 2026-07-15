@@ -191,6 +191,13 @@ def run_diff_helper(repository: Path, **environment: str) -> subprocess.Complete
     )
 
 
+def expected_codeql_upload(event_name: str, *, head_is_fork: bool, user_login: str) -> str:
+    restricted_pull_request = event_name == "pull_request" and (
+        head_is_fork or user_login == "dependabot[bot]"
+    )
+    return "never" if restricted_pull_request else "always"
+
+
 class WorkflowContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -342,13 +349,31 @@ class WorkflowContracts(unittest.TestCase):
                     },
                 )
 
-    def test_codeql_analyze_disables_only_fork_pull_request_uploads(self) -> None:
+    def test_codeql_analyze_disables_restricted_pull_request_uploads(self) -> None:
         analyze = step_map(self.codeql)["Analyze with CodeQL"]
-        self.assertNotIn("if", analyze, "CodeQL analysis must still run for fork pull requests")
+        self.assertNotIn("if", analyze, "CodeQL analysis must still run for restricted pull requests")
         self.assertEqual(
-            "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'never' || 'always' }}",
+            "${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]') && 'never' || 'always' }}",
             analyze.get("with", {}).get("upload"),
         )
+
+    def test_codeql_upload_policy_truth_table(self) -> None:
+        cases = {
+            "same-repository human pull request": ("pull_request", False, "contributor", "always"),
+            "real fork pull request": ("pull_request", True, "contributor", "never"),
+            "Dependabot pull request": ("pull_request", False, "dependabot[bot]", "never"),
+            "push": ("push", False, "dependabot[bot]", "always"),
+        }
+        for name, (event_name, head_is_fork, user_login, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    expected,
+                    expected_codeql_upload(
+                        event_name,
+                        head_is_fork=head_is_fork,
+                        user_login=user_login,
+                    ),
+                )
 
     def test_fixture_and_both_live_calls_use_the_same_exact_official_sdk(self) -> None:
         global_json_path = FIXTURES / "dotnet-smoke" / "global.json"
@@ -892,7 +917,13 @@ class WorkflowContracts(unittest.TestCase):
             "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json",
             readme,
         )
-        self.assertIn("workflow file exists on the default branch", readme)
+        self.assertIn(
+            "introducing pull request can discover the workflow from its pull request merge ref",
+            readme,
+        )
+        self.assertIn("Actions UI or API may list zero runs", readme)
+        self.assertIn("push to `develop` is deterministic", readme)
+        self.assertIn("actual live run is required before release", readme)
 
 
 if __name__ == "__main__":
