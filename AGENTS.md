@@ -9,6 +9,6 @@ This public repository owns reusable CI security controls for the current MALIEV
 - Pin every action and every consumer reference to a reviewed full commit SHA.
 - Treat permissions, input validation, checkout credential persistence, artifact retention, timeouts, and concurrency as tested contracts.
 - Add or update a failing contract test before changing workflow behavior.
-- Run `pwsh ./tests/validate.ps1` and `git diff --check` before committing.
+- Run `pwsh ./tests/validate.ps1 -ActionlintPath <reviewed-actionlint-binary>` and `git diff --check` before committing.
 
-Version workflow behavior through immutable commit SHAs. Document breaking input or output changes in the pull request and coordinate consumer updates before merging.
+Version workflow behavior through immutable commit SHAs. Require the repository self-validation jobs to pass and retain their run URLs as release evidence. Document breaking input or output changes in the pull request and coordinate consumer updates before merging.

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Maliev.Workflows.Smoke/Maliev.Workflows.Smoke.csproj" />
+  <Project Path="tests/Maliev.Workflows.Smoke.Tests/Maliev.Workflows.Smoke.Tests.csproj" />
+</Solution>
