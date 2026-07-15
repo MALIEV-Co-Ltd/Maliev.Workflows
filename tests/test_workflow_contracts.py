@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Security contract tests for MALIEV reusable workflows."""
+"""Executable security contracts for MALIEV reusable workflows."""
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,7 +16,42 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-SHA_REF = re.compile(r"^[^\s@]+@[0-9a-f]{40}(?:\s+#\s+v?\S+)?$")
+FIXTURES = ROOT / "tests" / "fixtures"
+SHA_REF = re.compile(r"^(?P<action>[^\s@]+)@(?P<sha>[0-9a-f]{40})$")
+ACTION_LINE = re.compile(
+    r"^\s*uses:\s*(?P<action>[^\s@]+)@(?P<sha>[0-9a-f]{40})\s+#\s+(?P<version>v\S+)\s*$",
+    re.MULTILINE,
+)
+ACTION_ALLOWLIST = {
+    "actions/checkout": (
+        "df4cb1c069e1874edd31b4311f1884172cec0e10",
+        "v6.0.3",
+    ),
+    "actions/setup-dotnet": (
+        "26b0ec14cb23fa6904739307f278c14f94c95bf1",
+        "v5.4.0",
+    ),
+    "actions/cache": (
+        "caa296126883cff596d87d8935842f9db880ef25",
+        "v5.1.0",
+    ),
+    "actions/upload-artifact": (
+        "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
+        "v6.0.0",
+    ),
+    "github/codeql-action/init": (
+        "99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+        "v4.37.0",
+    ),
+    "github/codeql-action/analyze": (
+        "99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+        "v4.37.0",
+    ),
+}
+
+
+def yaml_paths(root: Path) -> list[Path]:
+    return sorted({*root.rglob("*.yml"), *root.rglob("*.yaml")})
 
 
 def load_yaml(path: Path) -> dict:
@@ -31,131 +70,267 @@ def steps(workflow: dict) -> list[dict]:
     ]
 
 
+def step_map(workflow: dict) -> dict[str, dict]:
+    return {step["name"]: step for step in steps(workflow)}
+
+
+def embedded_python(command: str, marker: str) -> str:
+    match = re.search(r"python3 - .*?<<'PY'\n(?P<script>.*?)\nPY(?:\n|$)", command, re.DOTALL)
+    if not match or marker not in match.group("script"):
+        raise AssertionError(f"Embedded Python helper {marker!r} was not found")
+    return match.group("script")
+
+
+def run_python(script: str, args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory() as temporary:
+        script_path = Path(temporary) / "helper.py"
+        script_path.write_text(script, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(script_path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+
 class WorkflowContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.gate_path = WORKFLOWS / "dotnet-pr-gate.yml"
-        cls.codeql_path = WORKFLOWS / "codeql-dotnet.yml"
-        cls.gate = load_yaml(cls.gate_path)
-        cls.codeql = load_yaml(cls.codeql_path)
+        cls.workflow_paths = yaml_paths(WORKFLOWS)
+        cls.workflows = {path.name: load_yaml(path) for path in cls.workflow_paths}
+        cls.gate = cls.workflows["dotnet-pr-gate.yml"]
+        cls.codeql = cls.workflows["codeql-dotnet.yml"]
+        cls.gate_steps = step_map(cls.gate)
 
-    def test_all_yaml_files_parse(self) -> None:
-        yaml_files = sorted((ROOT / ".github").rglob("*.yml"))
-        self.assertGreaterEqual(len(yaml_files), 3)
-        for path in yaml_files:
+    def test_all_repository_yaml_files_parse(self) -> None:
+        paths = yaml_paths(ROOT / ".github")
+        self.assertGreaterEqual(len(paths), 3)
+        for path in paths:
             with self.subTest(path=path.relative_to(ROOT)):
                 load_yaml(path)
 
-    def test_workflows_are_reusable_only_and_do_not_accept_secrets(self) -> None:
-        allowed_gate_inputs = {
-            "target-path",
-            "working-directory",
-            "dotnet-version",
-            "configuration",
-            "coverage-threshold",
-            "artifact-retention-days",
+    def test_every_workflow_has_the_baseline_trigger_secret_and_permission_contract(self) -> None:
+        for name, workflow in self.workflows.items():
+            with self.subTest(workflow=name):
+                raw = next(path for path in self.workflow_paths if path.name == name).read_text(
+                    encoding="utf-8"
+                ).lower()
+                self.assertEqual({"workflow_call"}, set(workflow.get("on", {})))
+                call = workflow["on"]["workflow_call"] or {}
+                self.assertNotIn("secrets", call)
+                self.assertNotIn("pull_request_target", repr(workflow).lower())
+                self.assertNotIn("secrets: inherit", raw)
+                self.assertNotRegex(raw, r"\$\{\{\s*secrets(?:\.|\[)")
+                permissions = workflow.get("permissions", {})
+                self.assertEqual("read", permissions.get("contents"))
+                self.assertTrue(
+                    set(permissions).issubset({"contents", "security-events"}),
+                    permissions,
+                )
+                for job_name, job in workflow.get("jobs", {}).items():
+                    self.assertNotIn("permissions", job, job_name)
+                    timeout = int(job.get("timeout-minutes", "0"))
+                    self.assertGreater(timeout, 0, job_name)
+                    self.assertLessEqual(timeout, 60, job_name)
+
+    def test_workflow_inputs_are_exact_typed_and_do_not_expand_the_trust_boundary(self) -> None:
+        expected = {
+            "dotnet-pr-gate.yml": {
+                "target-path",
+                "working-directory",
+                "dotnet-version",
+                "configuration",
+                "coverage-threshold",
+                "artifact-retention-days",
+            },
+            "codeql-dotnet.yml": {"target-path", "working-directory", "dotnet-version"},
         }
-        for workflow, allowed_inputs in (
-            (self.gate, allowed_gate_inputs),
-            (self.codeql, {"target-path", "working-directory", "dotnet-version"}),
-        ):
-            trigger = workflow.get("on", {})
-            self.assertEqual({"workflow_call"}, set(trigger))
-            call = trigger["workflow_call"] or {}
-            self.assertNotIn("secrets", call)
-            self.assertEqual(allowed_inputs, set(call.get("inputs", {})))
-            for name, spec in call.get("inputs", {}).items():
-                self.assertIn(spec.get("type"), {"string", "number", "boolean"}, name)
+        forbidden = {"command", "script", "runner", "token", "secret", "action-ref"}
+        for name, workflow in self.workflows.items():
+            inputs = workflow["on"]["workflow_call"].get("inputs", {})
+            self.assertEqual(expected[name], set(inputs))
+            self.assertTrue(forbidden.isdisjoint(inputs))
+            for input_name, spec in inputs.items():
+                self.assertIn(spec.get("type"), {"string", "number", "boolean"}, input_name)
 
-    def test_gate_is_read_only_bounded_and_cancels_superseded_runs(self) -> None:
-        self.assertEqual({"contents": "read"}, self.gate.get("permissions"))
-        concurrency = self.gate.get("concurrency", {})
-        self.assertEqual("true", concurrency.get("cancel-in-progress"))
-        self.assertIn("github.workflow", concurrency.get("group", ""))
-        for name, job in self.gate["jobs"].items():
-            timeout = int(job.get("timeout-minutes", "0"))
-            self.assertGreater(timeout, 0, name)
-            self.assertLessEqual(timeout, 60, name)
-
-    def test_all_actions_are_immutable_and_checkout_is_read_only(self) -> None:
-        for workflow in (self.gate, self.codeql):
-            for step in steps(workflow):
-                if "uses" in step:
-                    self.assertRegex(step["uses"], SHA_REF)
-                if step.get("uses", "").startswith("actions/checkout@"):
-                    self.assertEqual("false", step.get("with", {}).get("persist-credentials"))
-                    if workflow is self.gate:
-                        self.assertEqual("0", step.get("with", {}).get("fetch-depth"))
-
-    def test_gate_commands_cover_the_required_dotnet_and_secret_checks(self) -> None:
-        commands = "\n".join(step.get("run", "") for step in steps(self.gate))
-        required = (
-            "dotnet restore",
-            "dotnet build",
-            "--no-restore",
-            "dotnet test",
-            "--collect:\"XPlat Code Coverage\"",
-            "dotnet format",
-            "--verify-no-changes",
-            "--vulnerable",
-            "--deprecated",
-            "--include-transitive",
-            "lines-covered",
-            "gitleaks-bin\" detect",
+    def test_every_action_matches_the_reviewed_owner_sha_version_allowlist(self) -> None:
+        observed: set[tuple[str, str, str]] = set()
+        for path in self.workflow_paths:
+            raw = path.read_text(encoding="utf-8")
+            parsed_actions = [step["uses"] for step in steps(self.workflows[path.name]) if "uses" in step]
+            raw_actions = {
+                (match["action"], match["sha"], match["version"])
+                for match in ACTION_LINE.finditer(raw)
+            }
+            self.assertEqual(len(parsed_actions), len(raw_actions), path.name)
+            for reference in parsed_actions:
+                match = SHA_REF.fullmatch(reference)
+                self.assertIsNotNone(match, reference)
+                action = match["action"]
+                self.assertIn(action, ACTION_ALLOWLIST, action)
+                expected_sha, expected_version = ACTION_ALLOWLIST[action]
+                self.assertEqual(expected_sha, match["sha"], action)
+                self.assertIn((action, expected_sha, expected_version), raw_actions)
+                observed.add((action, expected_sha, expected_version))
+        self.assertEqual(
+            {(action, *values) for action, values in ACTION_ALLOWLIST.items()},
+            observed,
         )
-        for expected in required:
-            with self.subTest(expected=expected):
-                self.assertIn(expected, commands)
-        for step in steps(self.gate):
-            self.assertNotRegex(step.get("run", ""), r"\$\{\{\s*inputs\.")
 
-    def test_inputs_are_validated_before_untrusted_source_is_checked_out(self) -> None:
-        for workflow in (self.gate, self.codeql):
-            workflow_steps = steps(workflow)
-            self.assertEqual("Validate bounded inputs", workflow_steps[0].get("name"))
-            validation = workflow_steps[0].get("run", "")
-            self.assertIn("repository-relative", validation)
-            self.assertIn("DOTNET_VERSION", validation)
-            checkout_index = next(
-                index
-                for index, step in enumerate(workflow_steps)
+    def test_checkout_is_credential_free_and_gate_scans_full_history(self) -> None:
+        for workflow_name, workflow in self.workflows.items():
+            checkout = next(
+                step
+                for step in steps(workflow)
                 if step.get("uses", "").startswith("actions/checkout@")
             )
-            self.assertGreater(checkout_index, 0)
+            self.assertEqual("false", checkout.get("with", {}).get("persist-credentials"))
+            if workflow_name == "dotnet-pr-gate.yml":
+                self.assertEqual("0", checkout.get("with", {}).get("fetch-depth"))
 
-    def test_no_dangerous_expression_or_secret_surfaces_exist(self) -> None:
-        forbidden_inputs = {"command", "script", "runner", "token", "secret", "action-ref"}
-        for workflow in (self.gate, self.codeql):
-            serialized = repr(workflow).lower()
-            self.assertNotIn("secrets: inherit", serialized)
-            self.assertNotIn("pull_request_target", serialized)
-            inputs = workflow["on"]["workflow_call"].get("inputs", {})
-            self.assertTrue(forbidden_inputs.isdisjoint(inputs))
-            for job in workflow["jobs"].values():
-                self.assertNotIn("permissions", job)
+    def test_gate_step_order_and_named_commands_preserve_dependencies(self) -> None:
+        names = [step["name"] for step in steps(self.gate)]
+        required_order = [
+            "Validate bounded inputs",
+            "Check out source without credentials",
+            "Resolve validated paths",
+            "Set up .NET SDK",
+            "Cache NuGet packages",
+            "Restore",
+            "Audit vulnerable dependencies",
+            "Audit deprecated dependencies",
+            "Enforce dependency audit",
+            "Build",
+            "Test with line coverage",
+            "Enforce line coverage threshold",
+            "Verify formatting",
+            "Install checksum-verified Gitleaks",
+            "Scan repository history for secrets",
+            "Upload test, coverage, and audit evidence",
+        ]
+        self.assertEqual(required_order, names)
+
+        commands = {name: self.gate_steps[name].get("run", "") for name in required_order}
+        self.assertIn('dotnet restore "$CI_TARGET"', commands["Restore"])
+        self.assertIn("--vulnerable", commands["Audit vulnerable dependencies"])
+        self.assertNotIn("--deprecated", commands["Audit vulnerable dependencies"])
+        self.assertIn("--deprecated", commands["Audit deprecated dependencies"])
+        self.assertNotIn("--vulnerable", commands["Audit deprecated dependencies"])
+        self.assertIn("--include-transitive", commands["Audit vulnerable dependencies"])
+        self.assertIn("--include-transitive", commands["Audit deprecated dependencies"])
+        self.assertIn("vulnerabilities", commands["Enforce dependency audit"])
+        self.assertIn("deprecationReasons", commands["Enforce dependency audit"])
+        self.assertIn("dotnet build", commands["Build"])
+        self.assertIn("--configuration", commands["Build"])
+        self.assertIn("--no-restore", commands["Build"])
+        self.assertIn("dotnet test", commands["Test with line coverage"])
+        self.assertIn('--collect:"XPlat Code Coverage"', commands["Test with line coverage"])
+        self.assertIn("dotnet format", commands["Verify formatting"])
+        self.assertIn("--verify-no-changes", commands["Verify formatting"])
+        self.assertIn("gitleaks-bin\" detect", commands["Scan repository history for secrets"])
+        for command in commands.values():
+            self.assertNotRegex(command, r"\$\{\{\s*inputs\.")
+
+    def test_bounded_input_helper_executes_real_path_threshold_and_retention_boundaries(self) -> None:
+        script = embedded_python(
+            self.gate_steps["Validate bounded inputs"]["run"],
+            "INPUT_VALIDATION_PYTHON",
+        )
+        baseline = {
+            **os.environ,
+            "TARGET_PATH": "src/App.slnx",
+            "WORKING_DIRECTORY": ".",
+            "DOTNET_VERSION": "10.0.x",
+            "CONFIGURATION": "Release",
+            "COVERAGE_THRESHOLD": "80.5",
+            "ARTIFACT_RETENTION_DAYS": "7",
+        }
+
+        def validate(**overrides: str) -> subprocess.CompletedProcess[str]:
+            return run_python(script, [], {**baseline, **overrides})
+
+        for path in ("../escape.slnx", "src/../../escape.slnx", "/tmp/App.slnx", r"src\App.slnx"):
+            with self.subTest(path=path):
+                self.assertNotEqual(0, validate(TARGET_PATH=path).returncode)
+        self.assertEqual(0, validate(TARGET_PATH="src/App.slnx").returncode)
+        for directory in ("../escape", "src/../../escape", "/tmp", r"src\nested"):
+            with self.subTest(directory=directory):
+                self.assertNotEqual(0, validate(WORKING_DIRECTORY=directory).returncode)
+        self.assertEqual(0, validate(WORKING_DIRECTORY="src/nested").returncode)
+
+        for threshold in ("0", "0.01", "99.999", "100", "100.0"):
+            with self.subTest(valid_threshold=threshold):
+                self.assertEqual(0, validate(COVERAGE_THRESHOLD=threshold).returncode)
+        for threshold in ("-0.1", "100.1", "101", "999", "nan", "1e2"):
+            with self.subTest(invalid_threshold=threshold):
+                self.assertNotEqual(0, validate(COVERAGE_THRESHOLD=threshold).returncode)
+
+        for retention in ("1", "7", "30"):
+            with self.subTest(valid_retention=retention):
+                self.assertEqual(0, validate(ARTIFACT_RETENTION_DAYS=retention).returncode)
+        for retention in ("0", "1.5", "31", "999", "-1"):
+            with self.subTest(invalid_retention=retention):
+                self.assertNotEqual(0, validate(ARTIFACT_RETENTION_DAYS=retention).returncode)
+
+    def test_coverage_helper_deduplicates_overlapping_source_lines(self) -> None:
+        script = embedded_python(
+            self.gate_steps["Enforce line coverage threshold"]["run"],
+            "COVERAGE_ENFORCEMENT_PYTHON",
+        )
+        result = run_python(
+            script,
+            [str(FIXTURES / "coverage-overlap-inflation"), "40"],
+        )
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("33.33%", result.stdout)
+
+    def test_coverage_helper_treats_any_hit_for_same_line_as_covered(self) -> None:
+        script = embedded_python(
+            self.gate_steps["Enforce line coverage threshold"]["run"],
+            "COVERAGE_ENFORCEMENT_PYTHON",
+        )
+        result = run_python(
+            script,
+            [str(FIXTURES / "coverage-overlap-any-hit"), "50"],
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("50.00%", result.stdout)
+
+    def test_format_and_gitleaks_are_independent_non_cancelled_checks(self) -> None:
+        formatting = self.gate_steps["Verify formatting"].get("if", "")
+        install = self.gate_steps["Install checksum-verified Gitleaks"].get("if", "")
+        scan = self.gate_steps["Scan repository history for secrets"].get("if", "")
+        self.assertIn("!cancelled()", formatting)
+        self.assertIn("steps.restore.outcome == 'success'", formatting)
+        self.assertEqual("${{ !cancelled() }}", install)
+        self.assertIn("!cancelled()", scan)
+        self.assertIn("steps.checkout.outcome == 'success'", scan)
+        self.assertIn("steps.gitleaks-install.outcome == 'success'", scan)
 
     def test_gate_only_caches_nuget_and_always_uploads_bounded_evidence(self) -> None:
-        cache_steps = [s for s in steps(self.gate) if s.get("uses", "").startswith("actions/cache@")]
+        cache_steps = [step for step in steps(self.gate) if step.get("uses", "").startswith("actions/cache@")]
         self.assertEqual(1, len(cache_steps))
         cache = cache_steps[0].get("with", {})
         self.assertEqual("~/.nuget/packages", cache.get("path"))
         self.assertIn("hashFiles", cache.get("key", ""))
-        self.assertNotIn("bin", cache.get("path", "").lower())
-        self.assertNotIn("obj", cache.get("path", "").lower())
+        self.assertNotRegex(cache.get("path", "").lower(), r"(^|/)(bin|obj)(/|$)")
 
-        uploads = [s for s in steps(self.gate) if s.get("uses", "").startswith("actions/upload-artifact@")]
-        self.assertEqual(1, len(uploads))
-        self.assertEqual("${{ always() }}", uploads[0].get("if"))
-        self.assertEqual("${{ inputs.artifact-retention-days }}", uploads[0]["with"].get("retention-days"))
+        upload = self.gate_steps["Upload test, coverage, and audit evidence"]
+        self.assertEqual("${{ always() }}", upload.get("if"))
+        self.assertEqual("${{ inputs.artifact-retention-days }}", upload["with"].get("retention-days"))
+        retention = self.gate["on"]["workflow_call"]["inputs"]["artifact-retention-days"]
+        self.assertEqual("number", retention.get("type"))
+        self.assertEqual("7", retention.get("default"))
 
     def test_codeql_has_only_the_additional_permission_it_needs(self) -> None:
         self.assertEqual(
             {"contents": "read", "security-events": "write"},
             self.codeql.get("permissions"),
         )
-        used = "\n".join(step.get("uses", "") for step in steps(self.codeql))
-        self.assertIn("github/codeql-action/init@", used)
-        self.assertIn("github/codeql-action/analyze@", used)
+        action_names = {step.get("uses", "").split("@", 1)[0] for step in steps(self.codeql)}
+        self.assertIn("github/codeql-action/init", action_names)
+        self.assertIn("github/codeql-action/analyze", action_names)
 
     def test_repository_ownership_and_operating_docs_exist(self) -> None:
         codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")

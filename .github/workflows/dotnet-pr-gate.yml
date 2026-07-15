@@ -58,36 +58,56 @@ jobs:
       - name: Validate bounded inputs
         shell: bash
         run: |
-          set -euo pipefail
-          validate_path() {
-            local value="$1"
-            local label="$2"
-            if [[ -z "$value" || "$value" = /* || "$value" = *\\* || "$value" =~ (^|/)\.\.(/|$) || ! "$value" =~ ^[A-Za-z0-9._/+@-]+$ ]]; then
-              echo "::error::$label must be a safe repository-relative path."
-              exit 1
-            fi
-          }
-          validate_path "$TARGET_PATH" "target-path"
-          validate_path "$WORKING_DIRECTORY" "working-directory"
-          [[ "$DOTNET_VERSION" =~ ^[0-9]+\.[0-9]+\.(x|[0-9]+)(-[A-Za-z0-9.-]+)?$ ]] || {
-            echo "::error::dotnet-version is not a bounded SDK version expression."
-            exit 1
-          }
-          [[ "$CONFIGURATION" = "Release" ]] || {
-            echo "::error::configuration must be Release."
-            exit 1
-          }
-          [[ "$COVERAGE_THRESHOLD" =~ ^([0-9]|[1-9][0-9]|100)(\.[0-9]+)?$ ]] || {
-            echo "::error::coverage-threshold must be between 0 and 100."
-            exit 1
-          }
-          [[ "$ARTIFACT_RETENTION_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || {
-            echo "::error::artifact-retention-days must be an integer from 1 to 30."
-            exit 1
-          }
+          python3 - <<'PY'
+          # INPUT_VALIDATION_PYTHON
+          from decimal import Decimal, InvalidOperation
+          import os
+          import re
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}")
+              raise SystemExit(1)
+
+          def validate_path(name: str) -> None:
+              value = os.environ[name]
+              segments = value.split("/")
+              if (
+                  not value
+                  or value.startswith("/")
+                  or "\\" in value
+                  or ".." in segments
+                  or not re.fullmatch(r"[A-Za-z0-9._/+@-]+", value)
+              ):
+                  fail(f"{name.lower().replace('_', '-')} must be a safe repository-relative path.")
+
+          validate_path("TARGET_PATH")
+          validate_path("WORKING_DIRECTORY")
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.(?:x|[0-9]+)(?:-[A-Za-z0-9.-]+)?", os.environ["DOTNET_VERSION"]):
+              fail("dotnet-version is not a bounded SDK version expression.")
+          if os.environ["CONFIGURATION"] != "Release":
+              fail("configuration must be Release.")
+
+          threshold_text = os.environ["COVERAGE_THRESHOLD"]
+          if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", threshold_text):
+              fail("coverage-threshold must be a plain decimal between 0 and 100.")
+          try:
+              threshold = Decimal(threshold_text)
+          except InvalidOperation:
+              fail("coverage-threshold must be a plain decimal between 0 and 100.")
+          if not threshold.is_finite() or threshold < 0 or threshold > 100:
+              fail("coverage-threshold must be between 0 and 100.")
+
+          retention_text = os.environ["ARTIFACT_RETENTION_DAYS"]
+          if not re.fullmatch(r"[0-9]+", retention_text):
+              fail("artifact-retention-days must be an integer from 1 to 30.")
+          retention = int(retention_text)
+          if retention < 1 or retention > 30:
+              fail("artifact-retention-days must be an integer from 1 to 30.")
+          PY
 
       - name: Check out source without credentials
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.1
+        id: checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -104,12 +124,12 @@ jobs:
           printf 'CI_WORK_ROOT=%s\nCI_TARGET=%s\n' "$work_root" "$target" >> "$GITHUB_ENV"
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.0.0
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: ${{ inputs.dotnet-version }}
 
       - name: Cache NuGet packages
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.0.3
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ inputs.dotnet-version }}-${{ hashFiles('**/*.sln', '**/*.slnx', '**/*.csproj', '**/*.props', '**/*.targets', '**/packages.lock.json', 'global.json', 'NuGet.config') }}
@@ -117,16 +137,28 @@ jobs:
             nuget-${{ runner.os }}-${{ inputs.dotnet-version }}-
 
       - name: Restore
+        id: restore
         shell: bash
         run: dotnet restore "$CI_TARGET"
 
-      - name: Audit vulnerable and deprecated dependencies
+      - name: Audit vulnerable dependencies
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RESULTS_DIRECTORY/package-audit"
           dotnet list "$CI_TARGET" package --vulnerable --include-transitive --format json > "$RESULTS_DIRECTORY/package-audit/vulnerable.json"
+
+      - name: Audit deprecated dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIRECTORY/package-audit"
           dotnet list "$CI_TARGET" package --deprecated --include-transitive --format json > "$RESULTS_DIRECTORY/package-audit/deprecated.json"
+
+      - name: Enforce dependency audit
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - "$RESULTS_DIRECTORY/package-audit" <<'PY'
           import json
           import pathlib
@@ -167,7 +199,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$RESULTS_DIRECTORY/tests" "$COVERAGE_THRESHOLD" <<'PY'
+          # COVERAGE_ENFORCEMENT_PYTHON
           import pathlib
+          import re
           import sys
           import xml.etree.ElementTree as ET
 
@@ -175,11 +209,33 @@ jobs:
           if not reports:
               print("::error::No Cobertura coverage reports were produced.")
               raise SystemExit(1)
-          covered = valid = 0
+
+          source_lines: dict[tuple[str, int], bool] = {}
           for report in reports:
               root = ET.parse(report).getroot()
-              covered += int(root.attrib.get("lines-covered", 0))
-              valid += int(root.attrib.get("lines-valid", 0))
+              for source_class in root.findall(".//class"):
+                  filename = source_class.attrib.get("filename", "").replace("\\", "/")
+                  filename = re.sub(r"/+", "/", filename)
+                  while filename.startswith("./"):
+                      filename = filename[2:]
+                  if not filename:
+                      print(f"::error::{report} contains a class without a source filename.")
+                      raise SystemExit(1)
+                  for line in source_class.findall("./lines/line"):
+                      try:
+                          line_number = int(line.attrib["number"])
+                          hits = int(line.attrib.get("hits", "0"))
+                      except (KeyError, ValueError):
+                          print(f"::error::{report} contains an invalid coverage line record.")
+                          raise SystemExit(1)
+                      if line_number <= 0 or hits < 0:
+                          print(f"::error::{report} contains an invalid coverage line record.")
+                          raise SystemExit(1)
+                      identity = (filename, line_number)
+                      source_lines[identity] = source_lines.get(identity, False) or hits > 0
+
+          valid = len(source_lines)
+          covered = sum(source_lines.values())
           if valid == 0:
               print("::error::Coverage reports contain no valid lines.")
               raise SystemExit(1)
@@ -192,10 +248,13 @@ jobs:
           PY
 
       - name: Verify formatting
+        if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
         shell: bash
         run: dotnet format "$CI_TARGET" --verify-no-changes --no-restore
 
       - name: Install checksum-verified Gitleaks
+        id: gitleaks-install
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -209,6 +268,7 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/gitleaks" "$RUNNER_TEMP/gitleaks-bin"
 
       - name: Scan repository history for secrets
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.gitleaks-install.outcome == 'success' }}
         shell: bash
         run: |
           "$RUNNER_TEMP/gitleaks-bin" detect --source "$GITHUB_WORKSPACE" --no-banner --redact --exit-code 1
