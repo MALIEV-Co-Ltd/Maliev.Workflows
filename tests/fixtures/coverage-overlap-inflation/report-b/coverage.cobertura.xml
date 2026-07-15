@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<coverage lines-covered="1" lines-valid="2" line-rate="0.5">
+  <packages><package name="fixture"><classes><class filename="src/Shared.cs"><lines>
+    <line number="10" hits="1" />
+    <line number="30" hits="0" />
+  </lines></class></classes></package></packages>
+</coverage>
