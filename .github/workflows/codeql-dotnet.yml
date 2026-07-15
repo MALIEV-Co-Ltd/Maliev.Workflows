@@ -40,17 +40,32 @@ jobs:
       - name: Validate bounded inputs
         shell: bash
         run: |
-          set -euo pipefail
-          for value in "$TARGET_PATH" "$WORKING_DIRECTORY"; do
-            if [[ -z "$value" || "$value" = /* || "$value" = *\\* || "$value" =~ (^|/)\.\.(/|$) || ! "$value" =~ ^[A-Za-z0-9._/+@-]+$ ]]; then
-              echo "::error::Workflow paths must be safe and repository-relative."
-              exit 1
-            fi
-          done
-          [[ "$DOTNET_VERSION" =~ ^[0-9]+\.[0-9]+\.(x|[0-9]+)(-[A-Za-z0-9.-]+)?$ ]] || {
-            echo "::error::dotnet-version is not a bounded SDK version expression."
-            exit 1
-          }
+          python3 - <<'PY'
+          # CODEQL_INPUT_VALIDATION_PYTHON
+          import os
+          import re
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}")
+              raise SystemExit(1)
+
+          def validate_path(name: str) -> None:
+              value = os.environ[name]
+              segments = value.split("/")
+              if (
+                  not value
+                  or value.startswith("/")
+                  or "\\" in value
+                  or ".." in segments
+                  or not re.fullmatch(r"[A-Za-z0-9._/+@-]+", value)
+              ):
+                  fail(f"{name.lower().replace('_', '-')} must be a safe repository-relative path.")
+
+          validate_path("TARGET_PATH")
+          validate_path("WORKING_DIRECTORY")
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.(?:x|[0-9]+)(?:-[A-Za-z0-9.-]+)?", os.environ["DOTNET_VERSION"]):
+              fail("dotnet-version is not a bounded SDK version expression.")
+          PY
 
       - name: Check out source without credentials
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
