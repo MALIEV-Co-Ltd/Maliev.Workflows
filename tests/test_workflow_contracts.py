@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import sys
@@ -78,6 +79,51 @@ EXPECTED_DOWNLOAD_STEPS = {
         "Install checksum-verified Gitleaks",
     },
 }
+OFFICIAL_DOTNET_SDK = "10.0.302"
+EXPECTED_CHECK_NAMES = {
+    "repository-contracts": "Repository contracts and supply chain",
+    "dotnet-gate-smoke": "Live reusable .NET gate smoke",
+    "codeql-smoke": "Live reusable CodeQL smoke",
+}
+EXPECTED_REUSABLE_JOB_NAMES = {
+    "dotnet-pr-gate.yml": {"validate": "Build, test, and inspect"},
+    "codeql-dotnet.yml": {"analyze": "Analyze C#"},
+}
+NETWORK_COMMAND_PATTERNS = {
+    "cloud-copy": re.compile(r"(?m)(?:^|[;&|]\s*)(?:aws\s+s3\s+cp|az\s+storage\b|gcloud\s+storage\b|gsutil\s+(?:cp|rsync))"),
+    "system-package": re.compile(r"(?m)(?:^|[;&|]\s*)(?:sudo\s+)?(?:apk|apt(?:-get)?|brew|choco|dnf|winget|yum|zypper)\s+(?:add|download|install|update|upgrade)\b"),
+    "cargo": re.compile(r"(?m)(?:^|[;&|]\s*)cargo\s+(?:install|fetch)\b"),
+    "composer": re.compile(r"(?m)(?:^|[;&|]\s*)(?:bundle|composer)\s+(?:install|update)\b"),
+    "curl": re.compile(r"(?m)(?:^|\s)curl(?:\.exe)?\s+"),
+    "docker": re.compile(r"(?m)(?:^|[;&|]\s*)docker\s+(?:pull|buildx\s+imagetools\s+create)\b"),
+    "dotnet-package-audit": re.compile(r"(?m)(?:^|[;&|]\s*)dotnet\s+list\s+.*?\s+package\s+--(?:vulnerable|deprecated)\b"),
+    "dotnet-restore": re.compile(r"(?m)(?:^|[;&|]\s*)dotnet\s+restore\b"),
+    "dotnet-tool": re.compile(r"(?m)(?:^|[;&|]\s*)dotnet\s+tool\s+(?:install|restore|update)\b"),
+    "gem": re.compile(r"(?m)(?:^|[;&|]\s*)gem\s+install\b"),
+    "git-network": re.compile(r"(?m)(?:^|[;&|]\s*)git\s+(?:clone|fetch|pull|submodule\s+(?:add|update))\b"),
+    "github-cli": re.compile(r"(?m)(?:^|[;&|]\s*)gh\s+(?:api|release\s+download)\b"),
+    "go-install": re.compile(r"(?m)(?:^|[;&|]\s*)go\s+install\b"),
+    "helm": re.compile(r"(?m)(?:^|[;&|]\s*)helm\s+(?:dependency\s+(?:build|update)|pull|repo\s+add)\b"),
+    "node-package": re.compile(r"(?m)(?:^|[;&|]\s*)(?:npm|pnpm|yarn)\s+(?:add|ci|fetch|install|update)\b"),
+    "nuget": re.compile(r"(?m)(?:^|[;&|]\s*)nuget\s+(?:install|restore|update)\b"),
+    "pip": re.compile(r"(?m)(?:^|\s)(?:python(?:3)?\s+-m\s+)?pip\s+(?:download|install|wheel)\b"),
+    "oci-client": re.compile(r"(?m)(?:^|[;&|]\s*)(?:crane|oras|skopeo)\s+(?:copy|pull)\b"),
+    "python-package": re.compile(r"(?m)(?:^|[;&|]\s*)(?:pipx|poetry|uv)\s+(?:add|install|sync)\b"),
+    "powershell-web": re.compile(r"(?im)(?:^|[;&|]\s*)(?:Invoke-RestMethod|Invoke-WebRequest|irm|iwr|Start-BitsTransfer)(?:\s|$)"),
+    "python-http": re.compile(r"(?m)\b(?:aiohttp|httpx|requests|urllib(?:\.request)?|urlopen)\b"),
+    "runtime-http": re.compile(r"(?m)\b(?:HttpClient|WebClient)\b|\bfetch\s*\("),
+    "wget": re.compile(r"(?m)(?:^|\s)wget(?:\.exe)?\s+"),
+}
+EXPECTED_NETWORK_INVENTORY = {
+    ("dotnet-pr-gate.yml", "Restore"): {"dotnet-restore"},
+    ("dotnet-pr-gate.yml", "Audit vulnerable dependencies"): {"dotnet-package-audit"},
+    ("dotnet-pr-gate.yml", "Audit deprecated dependencies"): {"dotnet-package-audit"},
+    ("dotnet-pr-gate.yml", "Install checksum-verified Gitleaks"): {"curl"},
+    ("codeql-dotnet.yml", "Restore and build analyzed source"): {"dotnet-restore"},
+    ("self-validate.yml", "Install hash-locked validation dependencies"): {"pip"},
+    ("self-validate.yml", "Install checksum-verified actionlint"): {"curl"},
+    ("self-validate.yml", "Install checksum-verified Gitleaks"): {"curl"},
+}
 
 
 def yaml_paths(root: Path) -> list[Path]:
@@ -122,6 +168,27 @@ def run_python(script: str, args: list[str], env: dict[str, str] | None = None) 
             text=True,
             env=env,
         )
+
+
+def run_git(repository: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def run_diff_helper(repository: Path, **environment: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tests" / "check_diff_range.py")],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **environment},
+    )
 
 
 class WorkflowContracts(unittest.TestCase):
@@ -222,20 +289,23 @@ class WorkflowContracts(unittest.TestCase):
             self.assertTrue(forbidden.isdisjoint(inputs))
             for input_name, spec in inputs.items():
                 self.assertIn(spec.get("type"), {"string", "number", "boolean"}, input_name)
+        self.assertEqual("10.0.x", self.gate["on"]["workflow_call"]["inputs"]["dotnet-version"]["default"])
+        self.assertEqual("10.0.x", self.codeql["on"]["workflow_call"]["inputs"]["dotnet-version"]["default"])
 
     def test_self_validation_calls_local_reusable_workflows_with_exact_safe_inputs(self) -> None:
         caller = self.workflows.get("self-validate.yml")
         self.assertIsNotNone(caller)
         jobs = caller["jobs"]
-        fixture = "tests/fixtures/dotnet-smoke/Maliev.Workflows.Smoke.slnx"
+        fixture_root = "tests/fixtures/dotnet-smoke"
+        fixture = "Maliev.Workflows.Smoke.slnx"
 
         gate = jobs["dotnet-gate-smoke"]
         self.assertEqual("./.github/workflows/dotnet-pr-gate.yml", gate.get("uses"))
         self.assertEqual(
             {
                 "target-path": fixture,
-                "working-directory": ".",
-                "dotnet-version": "10.0.x",
+                "working-directory": fixture_root,
+                "dotnet-version": OFFICIAL_DOTNET_SDK,
                 "configuration": "Release",
                 "coverage-threshold": "80",
                 "artifact-retention-days": "3",
@@ -248,32 +318,127 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(
             {
                 "target-path": fixture,
-                "working-directory": ".",
-                "dotnet-version": "10.0.x",
+                "working-directory": fixture_root,
+                "dotnet-version": OFFICIAL_DOTNET_SDK,
             },
             codeql.get("with"),
         )
         for job in (gate, codeql):
             self.assertNotIn("secrets", job)
 
-    def test_external_downloads_are_reviewed_and_integrity_checked(self) -> None:
-        download_pattern = re.compile(r"\b(?:curl|wget)\b|\bpip\s+install\b")
+    def test_required_check_and_reusable_job_display_names_are_stable(self) -> None:
+        caller = self.workflows["self-validate.yml"]
+        self.assertEqual(
+            EXPECTED_CHECK_NAMES,
+            {job_id: job.get("name") for job_id, job in caller["jobs"].items()},
+        )
+        for workflow_name, expected in EXPECTED_REUSABLE_JOB_NAMES.items():
+            with self.subTest(workflow=workflow_name):
+                self.assertEqual(
+                    expected,
+                    {
+                        job_id: job.get("name")
+                        for job_id, job in self.workflows[workflow_name]["jobs"].items()
+                    },
+                )
+
+    def test_codeql_analyze_disables_only_fork_pull_request_uploads(self) -> None:
+        analyze = step_map(self.codeql)["Analyze with CodeQL"]
+        self.assertNotIn("if", analyze, "CodeQL analysis must still run for fork pull requests")
+        self.assertEqual(
+            "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'never' || 'always' }}",
+            analyze.get("with", {}).get("upload"),
+        )
+
+    def test_fixture_and_both_live_calls_use_the_same_exact_official_sdk(self) -> None:
+        global_json_path = FIXTURES / "dotnet-smoke" / "global.json"
+        self.assertTrue(global_json_path.is_file())
+        global_json = json.loads(global_json_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {
+                "version": OFFICIAL_DOTNET_SDK,
+                "rollForward": "disable",
+                "allowPrerelease": False,
+            },
+            global_json.get("sdk"),
+        )
+        jobs = self.workflows["self-validate.yml"]["jobs"]
+        self.assertEqual(
+            global_json["sdk"]["version"],
+            jobs["dotnet-gate-smoke"]["with"]["dotnet-version"],
+        )
+        self.assertEqual(
+            global_json["sdk"]["version"],
+            jobs["codeql-smoke"]["with"]["dotnet-version"],
+        )
+
+    def test_dotnet_commands_execute_from_the_validated_working_directory(self) -> None:
+        gate_steps = step_map(self.gate)
+        for step_name in (
+            "Restore",
+            "Audit vulnerable dependencies",
+            "Audit deprecated dependencies",
+            "Build",
+            "Test with line coverage",
+            "Verify formatting",
+        ):
+            with self.subTest(workflow="dotnet-pr-gate.yml", step=step_name):
+                self.assertIn('cd "$CI_WORK_ROOT"', gate_steps[step_name].get("run", ""))
+
+        codeql_steps = step_map(self.codeql)
+        self.assertIn(
+            'printf \'CI_WORK_ROOT=%s\\nCI_TARGET=%s\\n\'',
+            codeql_steps["Resolve validated paths"].get("run", ""),
+        )
+        self.assertIn(
+            'cd "$CI_WORK_ROOT"',
+            codeql_steps["Restore and build analyzed source"].get("run", ""),
+        )
+
+    def test_network_capable_run_commands_match_the_explicit_inventory(self) -> None:
+        observed: dict[tuple[str, str], set[str]] = {}
         for name, workflow in self.workflows.items():
-            observed = {
+            for step in steps(workflow):
+                command = step.get("run", "")
+                mechanisms = {
+                    mechanism
+                    for mechanism, pattern in NETWORK_COMMAND_PATTERNS.items()
+                    if pattern.search(command)
+                }
+                if mechanisms:
+                    observed[(name, step["name"])] = mechanisms
+        self.assertEqual(EXPECTED_NETWORK_INVENTORY, observed)
+        for (workflow_name, step_name), mechanisms in EXPECTED_NETWORK_INVENTORY.items():
+            command = step_map(self.workflows[workflow_name])[step_name]["run"]
+            for mechanism in mechanisms:
+                with self.subTest(workflow=workflow_name, step=step_name, mechanism=mechanism):
+                    self.assertEqual(
+                        1,
+                        len(NETWORK_COMMAND_PATTERNS[mechanism].findall(command)),
+                        "each approved network mechanism must appear exactly once in its reviewed step",
+                    )
+
+    def test_external_downloads_are_reviewed_and_integrity_checked(self) -> None:
+        for name, workflow in self.workflows.items():
+            download_steps = {
                 step["name"]
                 for step in steps(workflow)
-                if download_pattern.search(step.get("run", ""))
+                if NETWORK_COMMAND_PATTERNS["curl"].search(step.get("run", ""))
+                or NETWORK_COMMAND_PATTERNS["pip"].search(step.get("run", ""))
             }
             with self.subTest(workflow=name):
-                self.assertEqual(EXPECTED_DOWNLOAD_STEPS[name], observed)
+                self.assertEqual(EXPECTED_DOWNLOAD_STEPS[name], download_steps)
 
         caller_steps = step_map(self.workflows["self-validate.yml"])
         dependencies = caller_steps["Install hash-locked validation dependencies"]["run"]
+        self.assertEqual(1, len(NETWORK_COMMAND_PATTERNS["pip"].findall(dependencies)))
         self.assertIn("--require-hashes", dependencies)
         self.assertIn("--only-binary=:all:", dependencies)
+        self.assertIn("--index-url https://pypi.org/simple", dependencies)
         self.assertIn("tests/requirements-validation.txt", dependencies)
 
         actionlint = caller_steps["Install checksum-verified actionlint"]["run"]
+        self.assertEqual(1, len(NETWORK_COMMAND_PATTERNS["curl"].findall(actionlint)))
         self.assertIn('readonly version="1.7.12"', actionlint)
         self.assertIn('readonly archive="actionlint_${version}_linux_amd64.tar.gz"', actionlint)
         self.assertIn(
@@ -281,14 +446,139 @@ class WorkflowContracts(unittest.TestCase):
             actionlint,
         )
         self.assertIn("sha256sum --check --strict", actionlint)
+        self.assertIn(
+            "curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output \"$RUNNER_TEMP/$archive\"",
+            actionlint,
+        )
+        self.assertIn(
+            'https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}',
+            actionlint,
+        )
+        self.assertIn(
+            'tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint',
+            actionlint,
+        )
 
         gitleaks = caller_steps["Install checksum-verified Gitleaks"]["run"]
+        self.assertEqual(1, len(NETWORK_COMMAND_PATTERNS["curl"].findall(gitleaks)))
         self.assertIn('readonly version="8.30.1"', gitleaks)
         self.assertIn(
             'readonly checksum="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"',
             gitleaks,
         )
         self.assertIn("sha256sum --check --strict", gitleaks)
+        self.assertIn(
+            "curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output \"$RUNNER_TEMP/$archive\"",
+            gitleaks,
+        )
+        self.assertIn(
+            'https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}',
+            gitleaks,
+        )
+        self.assertIn(
+            'tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks',
+            gitleaks,
+        )
+
+        all_commands = "\n".join(
+            step.get("run", "")
+            for workflow in self.workflows.values()
+            for step in steps(workflow)
+        )
+        literal_urls = set(re.findall(r"https://[^\s\"']+", all_commands))
+        self.assertEqual(
+            {
+                "https://pypi.org/simple",
+                "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}",
+                "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}",
+            },
+            literal_urls,
+        )
+        self.assertEqual(
+            {"github.com", "pypi.org"},
+            {re.match(r"https://([^/]+)", url).group(1) for url in literal_urls},
+        )
+
+    def test_diff_range_is_wired_through_environment_without_shell_interpolation(self) -> None:
+        validation = step_map(self.workflows["self-validate.yml"])[
+            "Validate YAML, workflow contracts, actionlint, and diff"
+        ]
+        self.assertEqual(
+            {
+                "MALIEV_EVENT_NAME": "${{ github.event_name }}",
+                "MALIEV_PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                "MALIEV_PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+                "MALIEV_PUSH_BEFORE_SHA": "${{ github.event.before }}",
+                "MALIEV_PUSH_AFTER_SHA": "${{ github.event.after }}",
+            },
+            validation.get("env"),
+        )
+        self.assertNotRegex(validation.get("run", ""), r"\$\{\{")
+        entrypoint = (ROOT / "tests" / "validate.ps1").read_text(encoding="utf-8")
+        self.assertIn("python tests/check_diff_range.py", entrypoint)
+        self.assertNotIn("git diff --check", entrypoint)
+
+    def test_diff_range_helper_rejects_committed_whitespace_and_accepts_clean_range(self) -> None:
+        helper = ROOT / "tests" / "check_diff_range.py"
+        self.assertTrue(helper.is_file())
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            self.assertEqual(0, run_git(repository, "init", "--initial-branch=main").returncode)
+            self.assertEqual(0, run_git(repository, "config", "user.name", "Workflow Test").returncode)
+            self.assertEqual(0, run_git(repository, "config", "user.email", "workflow@example.invalid").returncode)
+            tracked = repository / "tracked.txt"
+            tracked.write_text("clean\n", encoding="utf-8")
+            self.assertEqual(0, run_git(repository, "add", "tracked.txt").returncode)
+            self.assertEqual(0, run_git(repository, "commit", "-m", "clean base").returncode)
+            base = run_git(repository, "rev-parse", "HEAD").stdout.strip()
+
+            tracked.write_text("trailing whitespace \n", encoding="utf-8")
+            self.assertEqual(0, run_git(repository, "add", "tracked.txt").returncode)
+            self.assertEqual(0, run_git(repository, "commit", "-m", "bad whitespace").returncode)
+            bad = run_git(repository, "rev-parse", "HEAD").stdout.strip()
+            bad_result = run_diff_helper(
+                repository,
+                MALIEV_EVENT_NAME="pull_request",
+                MALIEV_PR_BASE_SHA=base,
+                MALIEV_PR_HEAD_SHA=bad,
+            )
+            self.assertNotEqual(0, bad_result.returncode)
+            self.assertIn("trailing whitespace", bad_result.stdout + bad_result.stderr)
+
+            initial_result = run_diff_helper(
+                repository,
+                MALIEV_EVENT_NAME="push",
+                MALIEV_PUSH_BEFORE_SHA="0" * 40,
+                MALIEV_PUSH_AFTER_SHA=bad,
+            )
+            self.assertNotEqual(0, initial_result.returncode)
+            self.assertIn("trailing whitespace", initial_result.stdout + initial_result.stderr)
+
+            tracked.write_text("clean again\n", encoding="utf-8")
+            self.assertEqual(0, run_git(repository, "add", "tracked.txt").returncode)
+            self.assertEqual(0, run_git(repository, "commit", "-m", "clean range").returncode)
+            clean = run_git(repository, "rev-parse", "HEAD").stdout.strip()
+            clean_result = run_diff_helper(
+                repository,
+                MALIEV_EVENT_NAME="push",
+                MALIEV_PUSH_BEFORE_SHA=bad,
+                MALIEV_PUSH_AFTER_SHA=clean,
+            )
+            self.assertEqual(0, clean_result.returncode, clean_result.stdout + clean_result.stderr)
+
+    def test_diff_range_helper_rejects_unsafe_sha_text_before_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            marker = repository / "must-not-exist"
+            result = run_diff_helper(
+                repository,
+                MALIEV_EVENT_NAME="push",
+                MALIEV_PUSH_BEFORE_SHA="0" * 40,
+                MALIEV_PUSH_AFTER_SHA=f"{'a' * 40};touch {marker}",
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("40 hexadecimal", result.stdout + result.stderr)
+            self.assertFalse(marker.exists())
 
     def test_validation_requirements_are_exact_and_hash_locked(self) -> None:
         requirements = ROOT / "tests" / "requirements-validation.txt"
@@ -299,7 +589,10 @@ class WorkflowContracts(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         ]
         self.assertEqual(1, len(lines))
-        self.assertRegex(lines[0], r"^PyYAML==6\.0\.3\s+--hash=sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            "PyYAML==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+            lines[0],
+        )
 
     def test_validation_entrypoint_accepts_only_an_explicit_actionlint_binary_path(self) -> None:
         validation = (ROOT / "tests" / "validate.ps1").read_text(encoding="utf-8")
@@ -314,6 +607,8 @@ class WorkflowContracts(unittest.TestCase):
             "Directory.Build.props",
             "Directory.Packages.props",
             "Maliev.Workflows.Smoke.slnx",
+            "NuGet.config",
+            "global.json",
             "src/Maliev.Workflows.Smoke/Maliev.Workflows.Smoke.csproj",
             "src/Maliev.Workflows.Smoke/HealthScore.cs",
             "src/Maliev.Workflows.Smoke/packages.lock.json",
@@ -336,6 +631,13 @@ class WorkflowContracts(unittest.TestCase):
         for package in ("Microsoft.NET.Test.Sdk", "coverlet.collector", "xunit.v3", "xunit.runner.visualstudio"):
             self.assertRegex(packages, rf'PackageVersion Include="{re.escape(package)}" Version="[0-9.]+"')
         self.assertNotIn('PackageVersion Include="xunit"', packages)
+
+    def test_fixture_uses_only_the_exact_official_nuget_v3_source(self) -> None:
+        nuget_config = (FIXTURES / "dotnet-smoke" / "NuGet.config").read_text(encoding="utf-8")
+        self.assertEqual(1, nuget_config.count("<clear />"))
+        self.assertEqual(1, nuget_config.count("<add "))
+        self.assertIn('value="https://api.nuget.org/v3/index.json"', nuget_config)
+        self.assertIn('protocolVersion="3"', nuget_config)
 
     def test_every_action_matches_the_reviewed_owner_sha_version_allowlist(self) -> None:
         observed: set[tuple[str, str, str]] = set()
@@ -487,6 +789,7 @@ class WorkflowContracts(unittest.TestCase):
 
     def test_gitleaks_binary_provenance_is_exact_and_immutable(self) -> None:
         install = self.gate_steps["Install checksum-verified Gitleaks"]["run"]
+        self.assertEqual(1, len(NETWORK_COMMAND_PATTERNS["curl"].findall(install)))
         self.assertIn('readonly version="8.30.1"', install)
         self.assertIn('readonly archive="gitleaks_${version}_linux_x64.tar.gz"', install)
         self.assertIn(
@@ -497,7 +800,15 @@ class WorkflowContracts(unittest.TestCase):
             'https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}',
             install,
         )
+        self.assertIn(
+            "curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output \"$RUNNER_TEMP/$archive\"",
+            install,
+        )
         self.assertIn("sha256sum --check --strict", install)
+        self.assertIn(
+            'tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks',
+            install,
+        )
 
     def test_coverage_helper_deduplicates_overlapping_source_lines(self) -> None:
         script = embedded_python(
@@ -577,6 +888,11 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("-ActionlintPath", agents)
         self.assertIn("self-validation", security.lower())
         self.assertRegex(readme, r"(?i)release.*commit SHA")
+        self.assertIn(
+            "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json",
+            readme,
+        )
+        self.assertIn("workflow file exists on the default branch", readme)
 
 
 if __name__ == "__main__":
