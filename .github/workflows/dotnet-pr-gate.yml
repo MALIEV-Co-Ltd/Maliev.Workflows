@@ -139,12 +139,16 @@ jobs:
       - name: Restore
         id: restore
         shell: bash
-        run: dotnet restore "$CI_TARGET"
+        run: |
+          set -euo pipefail
+          cd "$CI_WORK_ROOT"
+          dotnet restore "$CI_TARGET"
 
       - name: Audit vulnerable dependencies
         shell: bash
         run: |
           set -euo pipefail
+          cd "$CI_WORK_ROOT"
           mkdir -p "$RESULTS_DIRECTORY/package-audit"
           dotnet list "$CI_TARGET" package --vulnerable --include-transitive --format json > "$RESULTS_DIRECTORY/package-audit/vulnerable.json"
 
@@ -152,6 +156,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$CI_WORK_ROOT"
           mkdir -p "$RESULTS_DIRECTORY/package-audit"
           dotnet list "$CI_TARGET" package --deprecated --include-transitive --format json > "$RESULTS_DIRECTORY/package-audit/deprecated.json"
 
@@ -185,12 +190,16 @@ jobs:
 
       - name: Build
         shell: bash
-        run: dotnet build "$CI_TARGET" --configuration "$CONFIGURATION" --no-restore
+        run: |
+          set -euo pipefail
+          cd "$CI_WORK_ROOT"
+          dotnet build "$CI_TARGET" --configuration "$CONFIGURATION" --no-restore
 
       - name: Test with line coverage
         shell: bash
         run: |
           set -euo pipefail
+          cd "$CI_WORK_ROOT"
           mkdir -p "$RESULTS_DIRECTORY/tests"
           dotnet test "$CI_TARGET" --configuration "$CONFIGURATION" --no-restore --no-build --collect:"XPlat Code Coverage" --results-directory "$RESULTS_DIRECTORY/tests" --logger "trx;LogFilePrefix=tests"
 
@@ -250,7 +259,10 @@ jobs:
       - name: Verify formatting
         if: ${{ !cancelled() && steps.restore.outcome == 'success' }}
         shell: bash
-        run: dotnet format "$CI_TARGET" --verify-no-changes --no-restore
+        run: |
+          set -euo pipefail
+          cd "$CI_WORK_ROOT"
+          dotnet format "$CI_TARGET" --verify-no-changes --no-restore
 
       - name: Install checksum-verified Gitleaks
         id: gitleaks-install

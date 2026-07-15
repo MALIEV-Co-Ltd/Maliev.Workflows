@@ -29,9 +29,9 @@ try {
         throw 'actionlint failed.'
     }
 
-    git diff --check
+    python tests/check_diff_range.py
     if ($LASTEXITCODE -ne 0) {
-        throw 'git diff --check failed.'
+        throw 'Committed diff whitespace validation failed.'
     }
 }
 finally {

@@ -40,4 +40,8 @@ pwsh ./tests/validate.ps1 -ActionlintPath C:\path\to\actionlint.exe
 
 The entry point parses every repository workflow YAML file, runs the Python security contracts, requires the supplied actionlint binary, and verifies the diff. The caller additionally installs hash-locked Python dependencies, scans the complete checkout with checksum-verified Gitleaks, and executes both reusable workflows against the deterministic smoke fixture.
 
+The smoke fixture pins SDK `10.0.302` with roll-forward disabled. That version was verified against Microsoft's official [.NET 10 release metadata](https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json). Pull-request validation checks `base...head`; push validation checks `before...after`, with an empty-tree fallback for a new branch push.
+
+GitHub requires that a `pull_request` workflow file exists on the default branch before it can be discovered. The pull request that first introduces this caller therefore uses the local gate and existing branch checks; after the caller is merged to the default branch, subsequent pull requests execute all three checks. Fork pull requests still run CodeQL analysis but deliberately skip SARIF upload because their token cannot receive `security-events: write`.
+
 Workflow releases are immutable commit SHAs. A release commit SHA is eligible for consumers only after all three repository self-validation jobs are green. Record those run URLs and the reviewed commit SHA as release evidence before updating consumer pins. Dependabot proposes action-pin updates for review; a pin changes only after contract validation and release-note review.

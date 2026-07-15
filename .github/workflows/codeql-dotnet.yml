@@ -81,7 +81,7 @@ jobs:
           case "$work_root/" in "$GITHUB_WORKSPACE/"*) ;; *) echo "::error::working-directory escapes the checkout."; exit 1 ;; esac
           case "$target" in "$work_root"|"$work_root/"*) ;; *) echo "::error::target-path escapes working-directory."; exit 1 ;; esac
           [[ -e "$target" ]] || { echo "::error::target-path does not exist: $TARGET_PATH"; exit 1; }
-          printf 'CI_TARGET=%s\n' "$target" >> "$GITHUB_ENV"
+          printf 'CI_WORK_ROOT=%s\nCI_TARGET=%s\n' "$work_root" "$target" >> "$GITHUB_ENV"
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
@@ -98,6 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$CI_WORK_ROOT"
           dotnet restore "$CI_TARGET"
           dotnet build "$CI_TARGET" --configuration Release --no-restore
 
@@ -105,3 +106,4 @@ jobs:
         uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           category: /language:csharp
+          upload: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'never' || 'always' }}
