@@ -880,6 +880,10 @@ class WorkflowContracts(unittest.TestCase):
 
         upload = self.gate_steps["Upload test, coverage, and audit evidence"]
         self.assertEqual("${{ always() }}", upload.get("if"))
+        self.assertEqual("${{ github.workspace }}/ci-results", self.gate["jobs"]["validate"]["env"].get("RESULTS_DIRECTORY"))
+        self.assertEqual("ci-results/", upload["with"].get("path"))
+        self.assertEqual("error", upload["with"].get("if-no-files-found"))
+        self.assertFalse(upload["with"].get("include-hidden-files", "false") == "true")
         self.assertEqual("${{ inputs.artifact-retention-days }}", upload["with"].get("retention-days"))
         retention = self.gate["on"]["workflow_call"]["inputs"]["artifact-retention-days"]
         self.assertEqual("number", retention.get("type"))
@@ -924,6 +928,8 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("Actions UI or API may list zero runs", readme)
         self.assertIn("push to `develop` is deterministic", readme)
         self.assertIn("actual live run is required before release", readme)
+        self.assertIn("`ci-results/`", readme)
+        self.assertIn("fails if required evidence is absent", readme)
 
 
 if __name__ == "__main__":

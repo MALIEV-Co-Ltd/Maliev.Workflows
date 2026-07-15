@@ -40,6 +40,8 @@ pwsh ./tests/validate.ps1 -ActionlintPath C:\path\to\actionlint.exe
 
 The entry point parses every repository workflow YAML file, runs the Python security contracts, requires the supplied actionlint binary, and verifies the diff. The caller additionally installs hash-locked Python dependencies, scans the complete checkout with checksum-verified Gitleaks, and executes both reusable workflows against the deterministic smoke fixture.
 
+The .NET gate writes package audits, test results, and coverage into the visible `ci-results/` workspace directory. Artifact upload is required evidence and fails if required evidence is absent; it never degrades to a warning-only successful run.
+
 The smoke fixture pins SDK `10.0.302` with roll-forward disabled. That version was verified against Microsoft's official [.NET 10 release metadata](https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json). Pull-request validation checks `base...head`; push validation checks `before...after`, with an empty-tree fallback for a new branch push.
 
 An ordinary introducing pull request can discover the workflow from its pull request merge ref. Actions UI or API may list zero runs while the default `main` branch does not yet contain the workflow, so a push to `develop` is deterministic proof of the checked-in caller. An actual live run is required before release. Real fork and Dependabot pull requests still run CodeQL analysis but deliberately skip SARIF upload because their tokens cannot receive `security-events: write`; same-repository human pull requests and pushes upload normally.
