@@ -31,6 +31,10 @@ ACTION_ALLOWLIST = {
         "26b0ec14cb23fa6904739307f278c14f94c95bf1",
         "v5.4.0",
     ),
+    "actions/setup-python": (
+        "ece7cb06caefa5fff74198d8649806c4678c61a1",
+        "v6.3.0",
+    ),
     "actions/cache": (
         "caa296126883cff596d87d8935842f9db880ef25",
         "v5.1.0",
@@ -48,9 +52,31 @@ ACTION_ALLOWLIST = {
         "v4.37.0",
     ),
 }
+EXPECTED_TRIGGERS = {
+    "dotnet-pr-gate.yml": {"workflow_call"},
+    "codeql-dotnet.yml": {"workflow_call"},
+    "self-validate.yml": {"pull_request", "push"},
+}
 EXPECTED_PERMISSIONS = {
     "dotnet-pr-gate.yml": {"contents": "read"},
     "codeql-dotnet.yml": {"contents": "read", "security-events": "write"},
+    "self-validate.yml": {},
+}
+EXPECTED_JOB_PERMISSIONS = {
+    "self-validate.yml": {
+        "repository-contracts": {"contents": "read"},
+        "dotnet-gate-smoke": {"contents": "read"},
+        "codeql-smoke": {"contents": "read", "security-events": "write"},
+    },
+}
+EXPECTED_DOWNLOAD_STEPS = {
+    "dotnet-pr-gate.yml": {"Install checksum-verified Gitleaks"},
+    "codeql-dotnet.yml": set(),
+    "self-validate.yml": {
+        "Install hash-locked validation dependencies",
+        "Install checksum-verified actionlint",
+        "Install checksum-verified Gitleaks",
+    },
 }
 
 
@@ -114,24 +140,55 @@ class WorkflowContracts(unittest.TestCase):
             with self.subTest(path=path.relative_to(ROOT)):
                 load_yaml(path)
 
+    def test_repository_self_validation_caller_and_dotnet_fixture_exist(self) -> None:
+        self.assertTrue(
+            (WORKFLOWS / "self-validate.yml").is_file(),
+            "the repository self-validation caller workflow is required",
+        )
+        self.assertTrue(
+            (FIXTURES / "dotnet-smoke" / "Maliev.Workflows.Smoke.slnx").is_file(),
+            "the live reusable-workflow .NET fixture is required",
+        )
+
     def test_every_workflow_has_the_baseline_trigger_secret_and_permission_contract(self) -> None:
+        self.assertEqual(set(EXPECTED_TRIGGERS), set(self.workflows))
         for name, workflow in self.workflows.items():
             with self.subTest(workflow=name):
                 raw = next(path for path in self.workflow_paths if path.name == name).read_text(
                     encoding="utf-8"
                 ).lower()
-                self.assertEqual({"workflow_call"}, set(workflow.get("on", {})))
-                call = workflow["on"]["workflow_call"] or {}
-                self.assertNotIn("secrets", call)
+                self.assertEqual(EXPECTED_TRIGGERS[name], set(workflow.get("on", {})))
+                if "workflow_call" in workflow["on"]:
+                    call = workflow["on"]["workflow_call"] or {}
+                    self.assertNotIn("secrets", call)
                 self.assertNotIn("pull_request_target", repr(workflow).lower())
                 self.assertNotIn("secrets: inherit", raw)
                 self.assertNotRegex(raw, r"\$\{\{\s*secrets(?:\.|\[)")
                 self.assertEqual(EXPECTED_PERMISSIONS[name], workflow.get("permissions"))
                 for job_name, job in workflow.get("jobs", {}).items():
-                    self.assertNotIn("permissions", job, job_name)
-                    timeout = int(job.get("timeout-minutes", "0"))
-                    self.assertGreater(timeout, 0, job_name)
-                    self.assertLessEqual(timeout, 60, job_name)
+                    expected_job_permissions = EXPECTED_JOB_PERMISSIONS.get(name, {})
+                    if expected_job_permissions:
+                        self.assertEqual(
+                            expected_job_permissions[job_name],
+                            job.get("permissions"),
+                            job_name,
+                        )
+                    else:
+                        self.assertNotIn("permissions", job, job_name)
+                    if "uses" not in job:
+                        timeout = int(job.get("timeout-minutes", "0"))
+                        self.assertGreater(timeout, 0, job_name)
+                        self.assertLessEqual(timeout, 60, job_name)
+
+    def test_self_validation_trigger_is_exact_and_fork_safe(self) -> None:
+        caller = self.workflows.get("self-validate.yml")
+        self.assertIsNotNone(caller)
+        self.assertEqual("", caller["on"]["pull_request"])
+        self.assertEqual(
+            ["develop", "main"],
+            caller["on"]["push"].get("branches"),
+        )
+        self.assertEqual({}, caller.get("permissions"))
 
     def test_every_workflow_cancels_superseded_runs_with_a_bounded_group(self) -> None:
         for name, workflow in self.workflows.items():
@@ -158,11 +215,127 @@ class WorkflowContracts(unittest.TestCase):
         }
         forbidden = {"command", "script", "runner", "token", "secret", "action-ref"}
         for name, workflow in self.workflows.items():
+            if "workflow_call" not in workflow["on"]:
+                continue
             inputs = workflow["on"]["workflow_call"].get("inputs", {})
             self.assertEqual(expected[name], set(inputs))
             self.assertTrue(forbidden.isdisjoint(inputs))
             for input_name, spec in inputs.items():
                 self.assertIn(spec.get("type"), {"string", "number", "boolean"}, input_name)
+
+    def test_self_validation_calls_local_reusable_workflows_with_exact_safe_inputs(self) -> None:
+        caller = self.workflows.get("self-validate.yml")
+        self.assertIsNotNone(caller)
+        jobs = caller["jobs"]
+        fixture = "tests/fixtures/dotnet-smoke/Maliev.Workflows.Smoke.slnx"
+
+        gate = jobs["dotnet-gate-smoke"]
+        self.assertEqual("./.github/workflows/dotnet-pr-gate.yml", gate.get("uses"))
+        self.assertEqual(
+            {
+                "target-path": fixture,
+                "working-directory": ".",
+                "dotnet-version": "10.0.x",
+                "configuration": "Release",
+                "coverage-threshold": "80",
+                "artifact-retention-days": "3",
+            },
+            gate.get("with"),
+        )
+
+        codeql = jobs["codeql-smoke"]
+        self.assertEqual("./.github/workflows/codeql-dotnet.yml", codeql.get("uses"))
+        self.assertEqual(
+            {
+                "target-path": fixture,
+                "working-directory": ".",
+                "dotnet-version": "10.0.x",
+            },
+            codeql.get("with"),
+        )
+        for job in (gate, codeql):
+            self.assertNotIn("secrets", job)
+
+    def test_external_downloads_are_reviewed_and_integrity_checked(self) -> None:
+        download_pattern = re.compile(r"\b(?:curl|wget)\b|\bpip\s+install\b")
+        for name, workflow in self.workflows.items():
+            observed = {
+                step["name"]
+                for step in steps(workflow)
+                if download_pattern.search(step.get("run", ""))
+            }
+            with self.subTest(workflow=name):
+                self.assertEqual(EXPECTED_DOWNLOAD_STEPS[name], observed)
+
+        caller_steps = step_map(self.workflows["self-validate.yml"])
+        dependencies = caller_steps["Install hash-locked validation dependencies"]["run"]
+        self.assertIn("--require-hashes", dependencies)
+        self.assertIn("--only-binary=:all:", dependencies)
+        self.assertIn("tests/requirements-validation.txt", dependencies)
+
+        actionlint = caller_steps["Install checksum-verified actionlint"]["run"]
+        self.assertIn('readonly version="1.7.12"', actionlint)
+        self.assertIn('readonly archive="actionlint_${version}_linux_amd64.tar.gz"', actionlint)
+        self.assertIn(
+            'readonly checksum="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"',
+            actionlint,
+        )
+        self.assertIn("sha256sum --check --strict", actionlint)
+
+        gitleaks = caller_steps["Install checksum-verified Gitleaks"]["run"]
+        self.assertIn('readonly version="8.30.1"', gitleaks)
+        self.assertIn(
+            'readonly checksum="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"',
+            gitleaks,
+        )
+        self.assertIn("sha256sum --check --strict", gitleaks)
+
+    def test_validation_requirements_are_exact_and_hash_locked(self) -> None:
+        requirements = ROOT / "tests" / "requirements-validation.txt"
+        self.assertTrue(requirements.is_file())
+        lines = [
+            line.strip()
+            for line in requirements.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(1, len(lines))
+        self.assertRegex(lines[0], r"^PyYAML==6\.0\.3\s+--hash=sha256:[0-9a-f]{64}$")
+
+    def test_validation_entrypoint_accepts_only_an_explicit_actionlint_binary_path(self) -> None:
+        validation = (ROOT / "tests" / "validate.ps1").read_text(encoding="utf-8")
+        self.assertIn("[string] $ActionlintPath", validation)
+        self.assertIn("Test-Path -LiteralPath $ActionlintPath -PathType Leaf", validation)
+        self.assertIn("& $ActionlintPath -color", validation)
+        self.assertNotIn("Get-Command actionlint", validation)
+
+    def test_dotnet_smoke_fixture_is_minimal_deterministic_and_net10(self) -> None:
+        root = FIXTURES / "dotnet-smoke"
+        expected_files = {
+            "Directory.Build.props",
+            "Directory.Packages.props",
+            "Maliev.Workflows.Smoke.slnx",
+            "src/Maliev.Workflows.Smoke/Maliev.Workflows.Smoke.csproj",
+            "src/Maliev.Workflows.Smoke/HealthScore.cs",
+            "src/Maliev.Workflows.Smoke/packages.lock.json",
+            "tests/Maliev.Workflows.Smoke.Tests/Maliev.Workflows.Smoke.Tests.csproj",
+            "tests/Maliev.Workflows.Smoke.Tests/HealthScoreTests.cs",
+            "tests/Maliev.Workflows.Smoke.Tests/packages.lock.json",
+        }
+        actual_files = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and "bin" not in path.parts and "obj" not in path.parts
+        }
+        self.assertEqual(expected_files, actual_files)
+
+        props = (root / "Directory.Build.props").read_text(encoding="utf-8")
+        self.assertIn("<TargetFramework>net10.0</TargetFramework>", props)
+        self.assertIn("<RestoreLockedMode>true</RestoreLockedMode>", props)
+        self.assertIn("<TreatWarningsAsErrors>true</TreatWarningsAsErrors>", props)
+        packages = (root / "Directory.Packages.props").read_text(encoding="utf-8")
+        for package in ("Microsoft.NET.Test.Sdk", "coverlet.collector", "xunit.v3", "xunit.runner.visualstudio"):
+            self.assertRegex(packages, rf'PackageVersion Include="{re.escape(package)}" Version="[0-9.]+"')
+        self.assertNotIn('PackageVersion Include="xunit"', packages)
 
     def test_every_action_matches_the_reviewed_owner_sha_version_allowlist(self) -> None:
         observed: set[tuple[str, str, str]] = set()
@@ -393,6 +566,17 @@ class WorkflowContracts(unittest.TestCase):
             self.assertIn("Legacy.Maliev.Workflows", content)
             self.assertRegex(content, r"(?i)commit SHA")
             self.assertRegex(content, r"(?i)secret")
+
+    def test_operating_docs_describe_live_self_validation_and_release_evidence(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        self.assertIn("Repository self-validation", readme)
+        self.assertIn("-ActionlintPath", readme)
+        self.assertIn("live local reusable-workflow calls", readme)
+        self.assertIn("-ActionlintPath", agents)
+        self.assertIn("self-validation", security.lower())
+        self.assertRegex(readme, r"(?i)release.*commit SHA")
 
 
 if __name__ == "__main__":

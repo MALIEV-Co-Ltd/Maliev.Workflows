@@ -6,8 +6,9 @@ Reusable, least-privilege CI workflows for the current MALIEV platform fleet. Th
 
 - `.github/workflows/dotnet-pr-gate.yml` restores, audits, builds, tests with a line-coverage threshold, verifies formatting, scans history with a checksum-verified Gitleaks binary, and uploads bounded evidence.
 - `.github/workflows/codeql-dotnet.yml` performs a manual C# CodeQL build and analysis under the additional `security-events: write` permission that CodeQL requires.
+- `.github/workflows/self-validate.yml` validates this repository on pull requests and pushes to `develop` or `main`, then makes live local reusable-workflow calls against the checked-in .NET 10 smoke fixture.
 
-Both workflows are reusable through `workflow_call` only. They accept typed, validated inputs and no secrets. The baseline deliberately cannot restore private packages. Repositories that require private dependencies must produce an exact dependency artifact in a separate trusted job without broadening this workflow's trust boundary.
+The .NET gate and CodeQL workflows are reusable through `workflow_call` only. They accept typed, validated inputs and no secrets. The baseline deliberately cannot restore private packages. Repositories that require private dependencies must produce an exact dependency artifact in a separate trusted job without broadening this workflow's trust boundary.
 
 ## Consuming a workflow
 
@@ -29,10 +30,14 @@ Do not add `secrets: inherit`. Callers should declare only `contents: read` for 
 
 ## Validation and versioning
 
-Run the repository contract suite locally:
+### Repository self-validation
+
+Use the reviewed actionlint v1.7.12 binary from its checksum-verified release artifact, then run the complete repository contract suite locally:
 
 ```powershell
-pwsh ./tests/validate.ps1
+pwsh ./tests/validate.ps1 -ActionlintPath C:\path\to\actionlint.exe
 ```
 
-The entry point parses repository YAML, runs the security contract tests, and runs `actionlint` when it is installed. Workflow releases are immutable commit SHAs. Dependabot proposes action-pin updates for review; a pin is changed only after contract validation and release-note review.
+The entry point parses every repository workflow YAML file, runs the Python security contracts, requires the supplied actionlint binary, and verifies the diff. The caller additionally installs hash-locked Python dependencies, scans the complete checkout with checksum-verified Gitleaks, and executes both reusable workflows against the deterministic smoke fixture.
+
+Workflow releases are immutable commit SHAs. A release commit SHA is eligible for consumers only after all three repository self-validation jobs are green. Record those run URLs and the reviewed commit SHA as release evidence before updating consumer pins. Dependabot proposes action-pin updates for review; a pin changes only after contract validation and release-note review.
