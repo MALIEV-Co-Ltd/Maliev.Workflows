@@ -25,8 +25,8 @@ ACTION_LINE = re.compile(
 )
 ACTION_ALLOWLIST = {
     "actions/checkout": (
-        "df4cb1c069e1874edd31b4311f1884172cec0e10",
-        "v6.0.3",
+        "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+        "v7.0.0",
     ),
     "actions/setup-dotnet": (
         "26b0ec14cb23fa6904739307f278c14f94c95bf1",
