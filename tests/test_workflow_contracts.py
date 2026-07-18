@@ -37,8 +37,8 @@ ACTION_ALLOWLIST = {
         "v6.3.0",
     ),
     "actions/cache": (
-        "caa296126883cff596d87d8935842f9db880ef25",
-        "v5.1.0",
+        "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "v6.1.0",
     ),
     "actions/upload-artifact": (
         "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
