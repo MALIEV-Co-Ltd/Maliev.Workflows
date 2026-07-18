@@ -11,3 +11,29 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: nuget
+    directory: /tests/fixtures/dotnet-smoke
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Bangkok
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - ci
+    groups:
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
