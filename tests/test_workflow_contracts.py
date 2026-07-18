@@ -45,12 +45,12 @@ ACTION_ALLOWLIST = {
         "v7.0.1",
     ),
     "github/codeql-action/init": (
-        "99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
-        "v4.37.0",
+        "7188fc363630916deb702c7fdcf4e481b751f97a",
+        "v4.37.1",
     ),
     "github/codeql-action/analyze": (
-        "99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
-        "v4.37.0",
+        "7188fc363630916deb702c7fdcf4e481b751f97a",
+        "v4.37.1",
     ),
 }
 EXPECTED_TRIGGERS = {
