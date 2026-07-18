@@ -29,8 +29,8 @@ ACTION_ALLOWLIST = {
         "v7.0.0",
     ),
     "actions/setup-dotnet": (
-        "26b0ec14cb23fa6904739307f278c14f94c95bf1",
-        "v5.4.0",
+        "a98b56852c35b8e3190ac28c8c2271da59106c68",
+        "v6.0.0",
     ),
     "actions/setup-python": (
         "ece7cb06caefa5fff74198d8649806c4678c61a1",
