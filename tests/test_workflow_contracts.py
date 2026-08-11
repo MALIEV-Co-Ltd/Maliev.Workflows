@@ -25,8 +25,8 @@ ACTION_LINE = re.compile(
 )
 ACTION_ALLOWLIST = {
     "actions/checkout": (
-        "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
-        "v7.0.0",
+        "3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "v7.0.1",
     ),
     "actions/setup-dotnet": (
         "a98b56852c35b8e3190ac28c8c2271da59106c68",
@@ -45,12 +45,12 @@ ACTION_ALLOWLIST = {
         "v7.0.1",
     ),
     "github/codeql-action/init": (
-        "7188fc363630916deb702c7fdcf4e481b751f97a",
-        "v4.37.1",
+        "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+        "v4.37.3",
     ),
     "github/codeql-action/analyze": (
-        "7188fc363630916deb702c7fdcf4e481b751f97a",
-        "v4.37.1",
+        "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+        "v4.37.3",
     ),
 }
 EXPECTED_TRIGGERS = {
