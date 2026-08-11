@@ -33,8 +33,8 @@ ACTION_ALLOWLIST = {
         "v6.0.0",
     ),
     "actions/setup-python": (
-        "ece7cb06caefa5fff74198d8649806c4678c61a1",
-        "v6.3.0",
+        "5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "v7.0.0",
     ),
     "actions/cache": (
         "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
